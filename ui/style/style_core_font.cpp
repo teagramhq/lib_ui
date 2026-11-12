@@ -102,18 +102,19 @@ base::flat_map<uint64, uint32> QtFontsKeys;
 		| (uint64(font.pixelSize()));
 }
 
-bool LoadCustomFont(const QString &filePath) {
+QStringList LoadCustomFont(const QString &filePath) {
 	auto regularId = QFontDatabase::addApplicationFont(filePath);
 	if (regularId < 0) {
 		LOG(("Font Error: could not add '%1'.").arg(filePath));
-		return false;
+		return QStringList();
 	}
 
-	for (auto &family : QFontDatabase::applicationFontFamilies(regularId)) {
+	const auto families = QFontDatabase::applicationFontFamilies(regularId);
+	for (const auto &family : families) {
 		LOG(("Font: from '%1' loaded '%2'").arg(filePath, family));
 	}
 
-	return true;
+	return families;
 }
 
 [[nodiscard]] QString SystemMonospaceFont() {
@@ -372,13 +373,14 @@ void StartFonts() {
 
 	const auto name = u"Open Sans"_q;
 
+	auto openSansLoaded = false;
 	for (const auto &file : QDir(u":/gui/fonts/"_q).entryInfoList()) {
-		LoadCustomFont(file.canonicalFilePath());
+		const auto families = LoadCustomFont(file.canonicalFilePath());
+		openSansLoaded = openSansLoaded
+			|| families.contains(name, Qt::CaseInsensitive);
 	}
 
-	if (!QFontInfo(name).family().trimmed().startsWith(
-			name,
-			Qt::CaseInsensitive)) {
+	if (!openSansLoaded) {
 		const auto text = u"Unable to load '"_q
 			+ name
 			+ u"', expect font metric issues."_q;
