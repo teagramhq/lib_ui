@@ -11,12 +11,19 @@
 #include "base/base_file_utilities.h"
 #include "ui/integration.h"
 
+#include <QtCore/QCoreApplication>
+#include <QtCore/QEventLoop>
 #include <QtCore/QMap>
+#include <QtCore/QTimer>
 #include <QtCore/QVector>
 #include <QtCore/QDir>
 #include <QtGui/QFontInfo>
 #include <QtGui/QFontDatabase>
 #include <QtGui/QRawFont>
+
+#include <atomic>
+#include <system_error>
+#include <thread>
 
 #if __has_include(<glib.h>)
 #include <glib.h>
@@ -82,6 +89,20 @@ std::vector<QString> FontFamilies;
 base::flat_map<uint32, std::unique_ptr<ResolvedFont>> FontsByKey;
 base::flat_map<uint64, uint32> QtFontsKeys;
 
+struct DeferredMetrics {
+	FontData *data = nullptr;
+	QFont font;
+};
+
+struct DeferredMetricsUpdate {
+	FontData *data = nullptr;
+	int spacew = 0;
+	int elidew = 0;
+};
+
+std::vector<DeferredMetrics> DeferredFontMetrics;
+auto DeferShapedMetrics = false;
+
 [[nodiscard]] uint32 FontKey(int size, FontFlags flags, int family) {
 	return (uint32(family) << 18)
 		| (uint32(size) << 6)
@@ -133,8 +154,15 @@ QStringList LoadCustomFont(const QString &filePath) {
 	return openSansLoaded;
 }
 
-[[nodiscard]] int UnshapedWidth(const QRawFont &font, const QString &text) {
+[[nodiscard]] std::optional<int> TryKernedRawWidth(const QRawFont &font,
+												   const QString &text) {
+	if (!font.isValid()) {
+		return std::nullopt;
+	}
 	const auto glyphs = font.glyphIndexesForString(text);
+	if (glyphs.isEmpty() || ranges::contains(glyphs, 0U)) {
+		return std::nullopt;
+	}
 	const auto advances
 		= font.advancesForGlyphIndexes(glyphs, QRawFont::KernedAdvances);
 	auto width = 0.;
@@ -142,6 +170,67 @@ QStringList LoadCustomFont(const QString &filePath) {
 		width += advance.x();
 	}
 	return int(std::ceil(width));
+}
+
+[[nodiscard]] bool CanUseRawFixedMetrics(const QFont &font,
+										 const QRawFont &raw) {
+	if (!raw.isValid()) {
+		return false;
+	}
+	const auto resolved = QFontInfo(font).family();
+	if (resolved.compare(raw.familyName(), Qt::CaseInsensitive) != 0) {
+		return false;
+	}
+	// These tables can change glyph selection or advances during shaping.
+	// KernedAdvances handles the legacy kern table, but not these tables.
+	return raw.fontTable("GSUB").isEmpty() && raw.fontTable("GPOS").isEmpty()
+		   && raw.fontTable("morx").isEmpty() && raw.fontTable("mort").isEmpty()
+		   && raw.fontTable("kerx").isEmpty() && raw.fontTable("trak").isEmpty()
+		   && raw.fontTable("just").isEmpty();
+}
+
+[[nodiscard]] std::optional<int> TryRawFixedMetricWidth(const QFont &font,
+														const QString &text) {
+	const auto raw = QRawFont::fromFont(font);
+	if (!CanUseRawFixedMetrics(font, raw)) {
+		return std::nullopt;
+	}
+	return TryKernedRawWidth(raw, text);
+}
+
+[[nodiscard]] int ShapedWidth(const QFont &font, const QString &text) {
+	return int(std::ceil(QFontMetricsF(font).horizontalAdvance(text)));
+}
+
+struct FixedMetrics {
+	int spacew = 0;
+	int elidew = 0;
+};
+
+[[nodiscard]] FixedMetrics ShapedFixedMetrics(const QFont &font) {
+	const auto metrics = QFontMetricsF(font);
+	return {
+		.spacew = int(std::ceil(metrics.horizontalAdvance(u" "_q))),
+		.elidew = int(std::ceil(metrics.horizontalAdvance(u"..."_q))),
+	};
+}
+
+[[nodiscard]] FixedMetrics ComputeFixedMetrics(const QFont &font) {
+	const auto raw = QRawFont::fromFont(font);
+	if (!raw.isValid()) {
+		LOG(("Font Error: raw font for '%1' is invalid, using shaped metrics.")
+				.arg(font.family()));
+	} else if (CanUseRawFixedMetrics(font, raw)) {
+		const auto spacew = TryKernedRawWidth(raw, u" "_q);
+		const auto elidew = TryKernedRawWidth(raw, u"..."_q);
+		if (spacew && elidew) {
+			return {
+				.spacew = *spacew,
+				.elidew = *elidew,
+			};
+		}
+	}
+	return ShapedFixedMetrics(font);
 }
 
 [[nodiscard]] QString SystemMonospaceFont() {
@@ -178,18 +267,29 @@ QStringList LoadCustomFont(const QString &filePath) {
 		// Prefer system monospace font.
 		auto useSystem = manual.isEmpty();
 		if (!useSystem) {
-			const auto font = QFont(system);
-			const auto raw = QRawFont::fromFont(font);
-			if (raw.isValid()) {
-				useSystem
-					= UnshapedWidth(raw, u"i"_q) == UnshapedWidth(raw, u"W"_q);
+			if (DeferShapedMetrics) {
+				useSystem = true;
 			} else {
-				LOG(("Font Error: raw font for '%1' is invalid, using shaped "
-					 "metrics.")
-						.arg(system));
-				const auto metrics = QFontMetricsF(font);
-				useSystem = metrics.horizontalAdvance(u"i"_q)
-							== metrics.horizontalAdvance(u"W"_q);
+				const auto font = QFont(system);
+				const auto raw = QRawFont::fromFont(font);
+				if (!raw.isValid()) {
+					LOG(("Font Error: raw font for '%1' is invalid, using "
+						 "shaped metrics.")
+							.arg(system));
+				}
+				auto i = std::optional<int>();
+				auto w = std::optional<int>();
+				if (CanUseRawFixedMetrics(font, raw)) {
+					i = TryKernedRawWidth(raw, u"i"_q);
+					w = TryKernedRawWidth(raw, u"W"_q);
+				}
+				if (i && w) {
+					useSystem = (*i == *w);
+				} else {
+					const auto metrics = QFontMetricsF(font);
+					useSystem = metrics.horizontalAdvance(u"i"_q)
+								== metrics.horizontalAdvance(u"W"_q);
+				}
 			}
 		}
 #endif // Q_OS_WIN
@@ -403,6 +503,85 @@ struct Metrics {
 
 } // namespace
 
+std::optional<int> KernedRawWidth(const QRawFont &font, const QString &text) {
+	return TryKernedRawWidth(font, text);
+}
+
+std::optional<int> RawFixedMetricWidth(const QFont &font, const QString &text) {
+	return TryRawFixedMetricWidth(font, text);
+}
+
+int FixedMetricWidth(const QFont &font, const QString &text) {
+	if (const auto raw = TryRawFixedMetricWidth(font, text)) {
+		return *raw;
+	}
+	return ShapedWidth(font, text);
+}
+
+void SetShapedMetricsDeferred(bool deferred) { DeferShapedMetrics = deferred; }
+
+void ResolveDeferredShapedMetrics() {
+	const auto updateOnMainThread = [](const auto &updates) {
+		for (const auto &update : updates) {
+			update.data->spacew = update.spacew;
+			update.data->elidew = update.elidew;
+		}
+	};
+	const auto application = QCoreApplication::instance();
+	while (!DeferredFontMetrics.empty()) {
+		auto pending = std::move(DeferredFontMetrics);
+		DeferredFontMetrics.clear();
+		if (!application) {
+			for (const auto &entry : pending) {
+				const auto metrics = ComputeFixedMetrics(entry.font);
+				entry.data->spacew = metrics.spacew;
+				entry.data->elidew = metrics.elidew;
+			}
+			continue;
+		}
+
+		auto updates = std::vector<DeferredMetricsUpdate>(pending.size());
+		auto done = std::atomic_bool(false);
+		auto loop = QEventLoop();
+		auto timer = QTimer();
+		QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
+			if (done.load(std::memory_order_acquire)) {
+				loop.quit();
+			}
+		});
+		auto worker = std::thread();
+		try {
+			worker = std::thread([&] {
+				for (auto i = size_t(0); i != pending.size(); ++i) {
+					const auto &entry = pending[i];
+					const auto metrics = ComputeFixedMetrics(entry.font);
+					updates[i] = {
+						.data = entry.data,
+						.spacew = metrics.spacew,
+						.elidew = metrics.elidew,
+					};
+				}
+				done.store(true, std::memory_order_release);
+			});
+		} catch (const std::system_error &) {
+			LOG(("Font Error: could not start metrics worker, using shaped "
+				 "metrics."));
+			for (const auto &entry : pending) {
+				const auto metrics = ComputeFixedMetrics(entry.font);
+				entry.data->spacew = metrics.spacew;
+				entry.data->elidew = metrics.elidew;
+			}
+			continue;
+		}
+		timer.start(1);
+		loop.exec();
+		timer.stop();
+		worker.join();
+		updateOnMainThread(updates);
+	}
+	DeferShapedMetrics = false;
+}
+
 bool PreloadCustomFonts() {
 	return LoadCustomFonts();
 }
@@ -479,16 +658,14 @@ FontData::FontData(const FontResolveResult &result, FontVariants *modified)
 	height = int(base::SafeRound(result.height));
 	ascent = int(base::SafeRound(result.ascent));
 	descent = height - ascent;
-	// Avoid shaping fixed metrics while StartManager initializes fonts.
-	const auto raw = QRawFont::fromFont(f);
-	if (raw.isValid()) {
-		spacew = UnshapedWidth(raw, u" "_q);
-		elidew = UnshapedWidth(raw, u"..."_q);
+	if (DeferShapedMetrics) {
+		spacew = 0;
+		elidew = 0;
+		DeferredFontMetrics.push_back({this, f});
 	} else {
-		LOG(("Font Error: raw font for '%1' is invalid, using shaped metrics.")
-				.arg(f.family()));
-		spacew = width(u" "_q);
-		elidew = width(u"..."_q);
+		const auto metrics = ComputeFixedMetrics(f);
+		spacew = metrics.spacew;
+		elidew = metrics.elidew;
 	}
 
 	fascent = QFixed::fromReal(result.ascent);

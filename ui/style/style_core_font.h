@@ -11,10 +11,12 @@
 
 #include <QtGui/QFont>
 #include <QtGui/QFontMetrics>
+#include <QtGui/QRawFont>
 
 #include <private/qfixed_p.h>
 
 #include <cmath>
+#include <optional>
 
 namespace style {
 
@@ -53,6 +55,14 @@ namespace style::internal {
 void SetPreloadedCustomFonts(bool openSansLoaded);
 
 void StartFonts();
+
+[[nodiscard]] std::optional<int> KernedRawWidth(const QRawFont &font,
+												const QString &text);
+[[nodiscard]] std::optional<int> RawFixedMetricWidth(const QFont &font,
+													 const QString &text);
+[[nodiscard]] int FixedMetricWidth(const QFont &font, const QString &text);
+void SetShapedMetricsDeferred(bool deferred);
+void ResolveDeferredShapedMetrics();
 
 void DestroyFonts();
 int RegisterFontFamily(const QString &family);
