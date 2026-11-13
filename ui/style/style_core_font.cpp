@@ -137,7 +137,7 @@ QStringList LoadCustomFont(const QString &filePath) {
 	const auto glyphs = font.glyphIndexesForString(text);
 	const auto advances = font.advancesForGlyphIndexes(
 		glyphs,
-		QRawFont::SeparateAdvances);
+		QRawFont::KernedAdvances);
 	auto width = 0.;
 	for (const auto &advance : advances) {
 		width += advance.x();
@@ -177,9 +177,21 @@ QStringList LoadCustomFont(const QString &filePath) {
 		const auto useSystem = manual.isEmpty();
 #else // Q_OS_WIN
 		// Prefer system monospace font.
-		const auto raw = QRawFont::fromFont(QFont(system));
-		const auto useSystem = manual.isEmpty()
-			|| (UnshapedWidth(raw, u"i"_q) == UnshapedWidth(raw, u"W"_q));
+		auto useSystem = manual.isEmpty();
+		if (!useSystem) {
+			const auto font = QFont(system);
+			const auto raw = QRawFont::fromFont(font);
+			if (raw.isValid()) {
+				useSystem = UnshapedWidth(raw, u"i"_q)
+					== UnshapedWidth(raw, u"W"_q);
+			} else {
+				LOG(("Font Error: raw font for '%1' is invalid, using shaped metrics.")
+					.arg(system));
+				const auto metrics = QFontMetricsF(font);
+				useSystem = metrics.horizontalAdvance(u"i"_q)
+					== metrics.horizontalAdvance(u"W"_q);
+			}
+		}
 #endif // Q_OS_WIN
 		return useSystem ? system : manual;
 	}();
@@ -469,8 +481,15 @@ FontData::FontData(const FontResolveResult &result, FontVariants *modified)
 	descent = height - ascent;
 	// Avoid shaping fixed metrics while StartManager initializes fonts.
 	const auto raw = QRawFont::fromFont(f);
-	spacew = UnshapedWidth(raw, u" "_q);
-	elidew = UnshapedWidth(raw, u"..."_q);
+	if (raw.isValid()) {
+		spacew = UnshapedWidth(raw, u" "_q);
+		elidew = UnshapedWidth(raw, u"..."_q);
+	} else {
+		LOG(("Font Error: raw font for '%1' is invalid, using shaped metrics.")
+			.arg(f.family()));
+		spacew = width(u" "_q);
+		elidew = width(u"..."_q);
+	}
 
 	fascent = QFixed::fromReal(result.ascent);
 	fleading = QFixed::fromReal(_m.leading());
