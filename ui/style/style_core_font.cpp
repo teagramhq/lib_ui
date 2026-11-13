@@ -16,6 +16,7 @@
 #include <QtCore/QDir>
 #include <QtGui/QFontInfo>
 #include <QtGui/QFontDatabase>
+#include <QtGui/QRawFont>
 
 #if __has_include(<glib.h>)
 #include <glib.h>
@@ -132,6 +133,18 @@ QStringList LoadCustomFont(const QString &filePath) {
 	return openSansLoaded;
 }
 
+[[nodiscard]] int UnshapedWidth(const QRawFont &font, const QString &text) {
+	const auto glyphs = font.glyphIndexesForString(text);
+	const auto advances = font.advancesForGlyphIndexes(
+		glyphs,
+		QRawFont::SeparateAdvances);
+	auto width = 0.;
+	for (const auto &advance : advances) {
+		width += advance.x();
+	}
+	return int(std::ceil(width));
+}
+
 [[nodiscard]] QString SystemMonospaceFont() {
 	const auto type = QFontDatabase::FixedFont;
 	return QFontDatabase::systemFont(type).family();
@@ -164,9 +177,9 @@ QStringList LoadCustomFont(const QString &filePath) {
 		const auto useSystem = manual.isEmpty();
 #else // Q_OS_WIN
 		// Prefer system monospace font.
-		const auto metrics = QFontMetrics(QFont(system));
+		const auto raw = QRawFont::fromFont(QFont(system));
 		const auto useSystem = manual.isEmpty()
-			|| (metrics.horizontalAdvance(QChar('i')) == metrics.horizontalAdvance(QChar('W')));
+			|| (UnshapedWidth(raw, u"i"_q) == UnshapedWidth(raw, u"W"_q));
 #endif // Q_OS_WIN
 		return useSystem ? system : manual;
 	}();
@@ -454,8 +467,10 @@ FontData::FontData(const FontResolveResult &result, FontVariants *modified)
 	height = int(base::SafeRound(result.height));
 	ascent = int(base::SafeRound(result.ascent));
 	descent = height - ascent;
-	spacew = width(QLatin1Char(' '));
-	elidew = width(u"..."_q);
+	// Avoid shaping fixed metrics while StartManager initializes fonts.
+	const auto raw = QRawFont::fromFont(f);
+	spacew = UnshapedWidth(raw, u" "_q);
+	elidew = UnshapedWidth(raw, u"..."_q);
 
 	fascent = QFixed::fromReal(result.ascent);
 	fleading = QFixed::fromReal(_m.leading());
