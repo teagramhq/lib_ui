@@ -49,6 +49,9 @@ struct FontResolveResult {
 
 namespace style::internal {
 
+[[nodiscard]] bool PreloadCustomFonts();
+void SetPreloadedCustomFonts(bool openSansLoaded);
+
 void StartFonts();
 
 void DestroyFonts();

@@ -73,6 +73,8 @@ ResolvedFont::ResolvedFont(FontResolveResult result, FontVariants *modified)
 namespace {
 
 bool Started = false;
+bool CustomFontsPreloaded = false;
+bool OpenSansLoaded = false;
 
 base::flat_map<QString, int> FontFamilyIndices;
 std::vector<QString> FontFamilies;
@@ -115,6 +117,19 @@ QStringList LoadCustomFont(const QString &filePath) {
 	}
 
 	return families;
+}
+
+[[nodiscard]] bool LoadCustomFonts() {
+	style_InitFontsResource();
+
+	const auto name = u"Open Sans"_q;
+	auto openSansLoaded = false;
+	for (const auto &file : QDir(u":/gui/fonts/"_q).entryInfoList()) {
+		const auto families = LoadCustomFont(file.canonicalFilePath());
+		openSansLoaded = openSansLoaded
+			|| families.contains(name, Qt::CaseInsensitive);
+	}
+	return openSansLoaded;
 }
 
 [[nodiscard]] QString SystemMonospaceFont() {
@@ -363,24 +378,26 @@ struct Metrics {
 
 } // namespace
 
+bool PreloadCustomFonts() {
+	return LoadCustomFonts();
+}
+
+void SetPreloadedCustomFonts(bool openSansLoaded) {
+	CustomFontsPreloaded = true;
+	OpenSansLoaded = openSansLoaded;
+}
+
 void StartFonts() {
 	if (Started) {
 		return;
 	}
 	Started = true;
 
-	style_InitFontsResource();
-
 	const auto name = u"Open Sans"_q;
-
-	auto openSansLoaded = false;
-	for (const auto &file : QDir(u":/gui/fonts/"_q).entryInfoList()) {
-		const auto families = LoadCustomFont(file.canonicalFilePath());
-		openSansLoaded = openSansLoaded
-			|| families.contains(name, Qt::CaseInsensitive);
+	if (!CustomFontsPreloaded) {
+		SetPreloadedCustomFonts(LoadCustomFonts());
 	}
-
-	if (!openSansLoaded) {
+	if (!OpenSansLoaded) {
 		const auto text = u"Unable to load '"_q
 			+ name
 			+ u"', expect font metric issues."_q;
