@@ -525,10 +525,8 @@ namespace {
 constexpr auto kMaxMetricsWorkerStartAttempts = 20;
 
 template <typename CreateWorker, typename IsCancelled>
-bool ResolveDeferredShapedMetricsImpl(
-		CreateWorker createWorker,
-		IsCancelled isCancelled,
-		int retryDelay) {
+bool ResolveDeferredShapedMetricsImpl(CreateWorker createWorker,
+									  IsCancelled isCancelled, int retryDelay) {
 	const auto updateOnMainThread = [](const auto &updates) {
 		for (const auto &update : updates) {
 			update.data->spacew = update.spacew;
@@ -594,8 +592,7 @@ bool ResolveDeferredShapedMetricsImpl(
 			}
 		};
 		QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
-			if (done.load(std::memory_order_acquire)
-				|| isCancelled()) {
+			if (done.load(std::memory_order_acquire) || isCancelled()) {
 				loop.quit();
 			}
 		});
@@ -636,17 +633,14 @@ bool ResolveDeferredShapedMetricsImpl(
 bool ResolveDeferredShapedMetrics() {
 	return ResolveDeferredShapedMetricsImpl(
 		[](auto task) { return std::thread(std::move(task)); },
-		[] { return false; },
-		100);
+		[] { return false; }, 100);
 }
 
 namespace testing {
 
-bool ResolveDeferredShapedMetricsWithTestHooks(
-		int workerStartFailures,
-		bool cancel,
-		int retryDelay,
-		int *workerStartAttempts) {
+bool ResolveDeferredShapedMetricsWithTestHooks(int workerStartFailures,
+											   bool cancel, int retryDelay,
+											   int *workerStartAttempts) {
 	return ResolveDeferredShapedMetricsImpl(
 		[remainingFailures = workerStartFailures,
 		 workerStartAttempts](auto task) mutable {
@@ -660,8 +654,7 @@ bool ResolveDeferredShapedMetricsWithTestHooks(
 			}
 			return std::thread(std::move(task));
 		},
-		[cancel] { return cancel; },
-		retryDelay);
+		[cancel] { return cancel; }, retryDelay);
 }
 
 } // namespace testing
