@@ -11,12 +11,10 @@
 
 #include <QtGui/QFont>
 #include <QtGui/QFontMetrics>
-#include <QtGui/QRawFont>
 
 #include <private/qfixed_p.h>
 
 #include <cmath>
-#include <optional>
 
 namespace style {
 
@@ -51,18 +49,12 @@ struct FontResolveResult {
 
 namespace style::internal {
 
+// Registers the bundled fonts and reports whether Open Sans is among them.
+// Safe to call on a worker thread before StartFonts(), which then skips it.
 [[nodiscard]] bool PreloadCustomFonts();
 void SetPreloadedCustomFonts(bool openSansLoaded);
 
 void StartFonts();
-
-[[nodiscard]] std::optional<int> KernedRawWidth(const QRawFont &font,
-												const QString &text);
-[[nodiscard]] std::optional<int> RawFixedMetricWidth(const QFont &font,
-													 const QString &text);
-[[nodiscard]] int FixedMetricWidth(const QFont &font, const QString &text);
-void SetShapedMetricsDeferred(bool deferred);
-[[nodiscard]] bool ResolveDeferredShapedMetrics();
 
 void DestroyFonts();
 int RegisterFontFamily(const QString &family);
