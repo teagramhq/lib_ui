@@ -102,6 +102,7 @@ struct DeferredMetricsUpdate {
 
 std::vector<DeferredMetrics> DeferredFontMetrics;
 auto DeferShapedMetrics = false;
+auto MetricsWorkerStartFailuresForTests = 0;
 
 [[nodiscard]] uint32 FontKey(int size, FontFlags flags, int family) {
 	return (uint32(family) << 18)
@@ -520,6 +521,10 @@ int FixedMetricWidth(const QFont &font, const QString &text) {
 
 void SetShapedMetricsDeferred(bool deferred) { DeferShapedMetrics = deferred; }
 
+void SetMetricsWorkerStartFailuresForTests(int count) {
+	MetricsWorkerStartFailuresForTests = count;
+}
+
 void ResolveDeferredShapedMetrics() {
 	const auto updateOnMainThread = [](const auto &updates) {
 		for (const auto &update : updates) {
@@ -544,38 +549,53 @@ void ResolveDeferredShapedMetrics() {
 		auto done = std::atomic_bool(false);
 		auto loop = QEventLoop();
 		auto timer = QTimer();
+		auto retryTimer = QTimer();
+		retryTimer.setSingleShot(true);
+		auto worker = std::thread();
+		auto workerStartFailureLogged = false;
+		const auto startWorker = [&] {
+			if (worker.joinable()) {
+				return;
+			}
+			try {
+				if (MetricsWorkerStartFailuresForTests > 0) {
+					--MetricsWorkerStartFailuresForTests;
+					throw std::system_error(std::make_error_code(
+						std::errc::resource_unavailable_try_again));
+				}
+				worker = std::thread([&] {
+					for (auto i = size_t(0); i != pending.size(); ++i) {
+						const auto &entry = pending[i];
+						const auto metrics = ComputeFixedMetrics(entry.font);
+						updates[i] = {
+							.data = entry.data,
+							.spacew = metrics.spacew,
+							.elidew = metrics.elidew,
+						};
+					}
+					done.store(true, std::memory_order_release);
+				});
+				retryTimer.stop();
+			} catch (const std::system_error &) {
+				if (!workerStartFailureLogged) {
+					LOG(("Font Error: could not start metrics worker; "
+						 "retrying."));
+					workerStartFailureLogged = true;
+				}
+				retryTimer.start(100);
+			}
+		};
 		QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
 			if (done.load(std::memory_order_acquire)) {
 				loop.quit();
 			}
 		});
-		auto worker = std::thread();
-		try {
-			worker = std::thread([&] {
-				for (auto i = size_t(0); i != pending.size(); ++i) {
-					const auto &entry = pending[i];
-					const auto metrics = ComputeFixedMetrics(entry.font);
-					updates[i] = {
-						.data = entry.data,
-						.spacew = metrics.spacew,
-						.elidew = metrics.elidew,
-					};
-				}
-				done.store(true, std::memory_order_release);
-			});
-		} catch (const std::system_error &) {
-			LOG(("Font Error: could not start metrics worker, using shaped "
-				 "metrics."));
-			for (const auto &entry : pending) {
-				const auto metrics = ComputeFixedMetrics(entry.font);
-				entry.data->spacew = metrics.spacew;
-				entry.data->elidew = metrics.elidew;
-			}
-			continue;
-		}
+		QObject::connect(&retryTimer, &QTimer::timeout, &loop, startWorker);
 		timer.start(1);
+		startWorker();
 		loop.exec();
 		timer.stop();
+		retryTimer.stop();
 		worker.join();
 		updateOnMainThread(updates);
 	}
