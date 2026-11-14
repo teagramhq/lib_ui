@@ -687,7 +687,10 @@ bool ResolveDeferredShapedMetricsWithActiveWorkerQuitForTests(
 	const auto shutdownConnection = QObject::connect(
 		application, &QCoreApplication::aboutToQuit, application,
 		[&] {
-			shutdownObserved.store(true, std::memory_order_release);
+			{
+				auto lock = std::unique_lock(mutex);
+				shutdownObserved.store(true, std::memory_order_release);
+			}
 			condition.notify_all();
 		},
 		Qt::DirectConnection);
