@@ -62,8 +62,9 @@ void StartFonts();
 													 const QString &text);
 [[nodiscard]] int FixedMetricWidth(const QFont &font, const QString &text);
 void SetShapedMetricsDeferred(bool deferred);
-void ResolveDeferredShapedMetrics();
+[[nodiscard]] bool ResolveDeferredShapedMetrics();
 void SetMetricsWorkerStartFailuresForTests(int count);
+void SetMetricsResolutionCancelledForTests(bool cancelled);
 
 void DestroyFonts();
 int RegisterFontFamily(const QString &family);

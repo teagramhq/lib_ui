@@ -103,6 +103,7 @@ struct DeferredMetricsUpdate {
 std::vector<DeferredMetrics> DeferredFontMetrics;
 auto DeferShapedMetrics = false;
 auto MetricsWorkerStartFailuresForTests = 0;
+auto MetricsResolutionCancelledForTests = false;
 
 [[nodiscard]] uint32 FontKey(int size, FontFlags flags, int family) {
 	return (uint32(family) << 18)
@@ -525,7 +526,11 @@ void SetMetricsWorkerStartFailuresForTests(int count) {
 	MetricsWorkerStartFailuresForTests = count;
 }
 
-void ResolveDeferredShapedMetrics() {
+void SetMetricsResolutionCancelledForTests(bool cancelled) {
+	MetricsResolutionCancelledForTests = cancelled;
+}
+
+bool ResolveDeferredShapedMetrics() {
 	const auto updateOnMainThread = [](const auto &updates) {
 		for (const auto &update : updates) {
 			update.data->spacew = update.spacew;
@@ -586,7 +591,8 @@ void ResolveDeferredShapedMetrics() {
 			}
 		};
 		QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
-			if (done.load(std::memory_order_acquire)) {
+			if (done.load(std::memory_order_acquire)
+				|| MetricsResolutionCancelledForTests) {
 				loop.quit();
 			}
 		});
@@ -596,10 +602,22 @@ void ResolveDeferredShapedMetrics() {
 		loop.exec();
 		timer.stop();
 		retryTimer.stop();
+		const auto cancelled = !done.load(std::memory_order_acquire);
+		if (!worker.joinable()) {
+			DeferredFontMetrics.clear();
+			DeferShapedMetrics = false;
+			return false;
+		}
 		worker.join();
 		updateOnMainThread(updates);
+		if (cancelled) {
+			DeferredFontMetrics.clear();
+			DeferShapedMetrics = false;
+			return false;
+		}
 	}
 	DeferShapedMetrics = false;
+	return true;
 }
 
 bool PreloadCustomFonts() {
