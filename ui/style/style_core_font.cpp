@@ -22,6 +22,8 @@
 #include <QtGui/QRawFont>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <system_error>
 #include <thread>
 
@@ -548,6 +550,7 @@ bool ResolveDeferredShapedMetricsImpl(CreateWorker createWorker,
 
 		auto updates = std::vector<DeferredMetricsUpdate>(pending.size());
 		auto done = std::atomic_bool(false);
+		auto shutdownRequested = false;
 		auto loop = QEventLoop();
 		auto timer = QTimer();
 		auto retryTimer = QTimer();
@@ -592,16 +595,30 @@ bool ResolveDeferredShapedMetricsImpl(CreateWorker createWorker,
 			}
 		};
 		QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
-			if (done.load(std::memory_order_acquire) || isCancelled()) {
+			if (done.load(std::memory_order_acquire) || shutdownRequested
+				|| isCancelled()) {
 				loop.quit();
 			}
 		});
+		QObject::connect(application, &QCoreApplication::aboutToQuit, &loop,
+						 [&] {
+							 shutdownRequested = true;
+							 loop.quit();
+						 });
 		QObject::connect(&retryTimer, &QTimer::timeout, &loop, startWorker);
 		timer.start(1);
 		startWorker();
 		loop.exec();
 		timer.stop();
 		retryTimer.stop();
+		if (shutdownRequested || isCancelled()) {
+			if (worker.joinable()) {
+				worker.join();
+			}
+			DeferredFontMetrics.clear();
+			DeferShapedMetrics = false;
+			return false;
+		}
 		if (workerStartFailed) {
 			for (const auto &entry : pending) {
 				const auto metrics = ComputeFixedMetrics(entry.font);
@@ -610,19 +627,17 @@ bool ResolveDeferredShapedMetricsImpl(CreateWorker createWorker,
 			}
 			continue;
 		}
-		const auto cancelled = !done.load(std::memory_order_acquire);
-		if (!worker.joinable()) {
+		const auto completed = done.load(std::memory_order_acquire);
+		if (!worker.joinable() || !completed) {
+			if (worker.joinable()) {
+				worker.join();
+			}
 			DeferredFontMetrics.clear();
 			DeferShapedMetrics = false;
 			return false;
 		}
 		worker.join();
 		updateOnMainThread(updates);
-		if (cancelled) {
-			DeferredFontMetrics.clear();
-			DeferShapedMetrics = false;
-			return false;
-		}
 	}
 	DeferShapedMetrics = false;
 	return true;
@@ -655,6 +670,62 @@ bool ResolveDeferredShapedMetricsWithTestHooks(int workerStartFailures,
 			return std::thread(std::move(task));
 		},
 		[cancel] { return cancel; }, retryDelay);
+}
+
+bool ResolveDeferredShapedMetricsWithActiveWorkerQuitForTests(
+	bool *workerStartedResult, bool *quitObservedResult,
+	bool *resolverCancelledResult) {
+	const auto application = QCoreApplication::instance();
+	if (!application || DeferredFontMetrics.empty()) {
+		return false;
+	}
+	auto shutdownObserved = std::atomic_bool(false);
+	auto workerStarted = std::atomic_bool(false);
+	auto quitObserved = std::atomic_bool(false);
+	auto mutex = std::mutex();
+	auto condition = std::condition_variable();
+	const auto shutdownConnection = QObject::connect(
+		application, &QCoreApplication::aboutToQuit, application,
+		[&] {
+			shutdownObserved.store(true, std::memory_order_release);
+			condition.notify_all();
+		},
+		Qt::DirectConnection);
+	QTimer::singleShot(0, application, [] { QCoreApplication::exit(0); });
+	const auto resolved = ResolveDeferredShapedMetricsImpl(
+		[&](auto task) {
+			auto worker = std::thread([&, task = std::move(task)]() mutable {
+				workerStarted.store(true, std::memory_order_release);
+				auto lock = std::unique_lock(mutex);
+				condition.wait(lock, [&] {
+					return shutdownObserved.load(std::memory_order_acquire);
+				});
+				quitObserved.store(true, std::memory_order_release);
+				task();
+			});
+			while (!workerStarted.load(std::memory_order_acquire)) {
+				std::this_thread::yield();
+			}
+			return worker;
+		},
+		[] { return false; }, 100);
+	QObject::disconnect(shutdownConnection);
+	const auto workerStartedValue
+		= workerStarted.load(std::memory_order_acquire);
+	const auto quitObservedValue = quitObserved.load(std::memory_order_acquire);
+	const auto resolverCancelled = !resolved;
+	if (workerStartedResult) {
+		*workerStartedResult = workerStartedValue;
+	}
+	if (quitObservedResult) {
+		*quitObservedResult = quitObservedValue;
+	}
+	if (resolverCancelledResult) {
+		*resolverCancelledResult = resolverCancelled;
+	}
+	return workerStartedValue && quitObservedValue
+		   && shutdownObserved.load(std::memory_order_acquire)
+		   && resolverCancelled;
 }
 
 } // namespace testing
