@@ -102,8 +102,6 @@ struct DeferredMetricsUpdate {
 
 std::vector<DeferredMetrics> DeferredFontMetrics;
 auto DeferShapedMetrics = false;
-auto MetricsWorkerStartFailuresForTests = 0;
-auto MetricsResolutionCancelledForTests = false;
 
 [[nodiscard]] uint32 FontKey(int size, FontFlags flags, int family) {
 	return (uint32(family) << 18)
@@ -522,15 +520,15 @@ int FixedMetricWidth(const QFont &font, const QString &text) {
 
 void SetShapedMetricsDeferred(bool deferred) { DeferShapedMetrics = deferred; }
 
-void SetMetricsWorkerStartFailuresForTests(int count) {
-	MetricsWorkerStartFailuresForTests = count;
-}
+namespace {
 
-void SetMetricsResolutionCancelledForTests(bool cancelled) {
-	MetricsResolutionCancelledForTests = cancelled;
-}
+constexpr auto kMaxMetricsWorkerStartAttempts = 20;
 
-bool ResolveDeferredShapedMetrics() {
+template <typename CreateWorker, typename IsCancelled>
+bool ResolveDeferredShapedMetricsImpl(
+		CreateWorker createWorker,
+		IsCancelled isCancelled,
+		int retryDelay) {
 	const auto updateOnMainThread = [](const auto &updates) {
 		for (const auto &update : updates) {
 			update.data->spacew = update.spacew;
@@ -558,17 +556,15 @@ bool ResolveDeferredShapedMetrics() {
 		retryTimer.setSingleShot(true);
 		auto worker = std::thread();
 		auto workerStartFailureLogged = false;
+		auto workerStartFailed = false;
+		auto workerStartAttempts = 0;
 		const auto startWorker = [&] {
-			if (worker.joinable()) {
+			if (worker.joinable() || workerStartFailed) {
 				return;
 			}
+			++workerStartAttempts;
 			try {
-				if (MetricsWorkerStartFailuresForTests > 0) {
-					--MetricsWorkerStartFailuresForTests;
-					throw std::system_error(std::make_error_code(
-						std::errc::resource_unavailable_try_again));
-				}
-				worker = std::thread([&] {
+				worker = createWorker([&] {
 					for (auto i = size_t(0); i != pending.size(); ++i) {
 						const auto &entry = pending[i];
 						const auto metrics = ComputeFixedMetrics(entry.font);
@@ -587,12 +583,19 @@ bool ResolveDeferredShapedMetrics() {
 						 "retrying."));
 					workerStartFailureLogged = true;
 				}
-				retryTimer.start(100);
+				if (workerStartAttempts >= kMaxMetricsWorkerStartAttempts) {
+					LOG(("Font Error: metrics worker retries exhausted; "
+						 "resolving shaped metrics on the main thread."));
+					workerStartFailed = true;
+					loop.quit();
+				} else {
+					retryTimer.start(retryDelay);
+				}
 			}
 		};
 		QObject::connect(&timer, &QTimer::timeout, &loop, [&] {
 			if (done.load(std::memory_order_acquire)
-				|| MetricsResolutionCancelledForTests) {
+				|| isCancelled()) {
 				loop.quit();
 			}
 		});
@@ -602,6 +605,14 @@ bool ResolveDeferredShapedMetrics() {
 		loop.exec();
 		timer.stop();
 		retryTimer.stop();
+		if (workerStartFailed) {
+			for (const auto &entry : pending) {
+				const auto metrics = ComputeFixedMetrics(entry.font);
+				entry.data->spacew = metrics.spacew;
+				entry.data->elidew = metrics.elidew;
+			}
+			continue;
+		}
 		const auto cancelled = !done.load(std::memory_order_acquire);
 		if (!worker.joinable()) {
 			DeferredFontMetrics.clear();
@@ -619,6 +630,41 @@ bool ResolveDeferredShapedMetrics() {
 	DeferShapedMetrics = false;
 	return true;
 }
+
+} // namespace
+
+bool ResolveDeferredShapedMetrics() {
+	return ResolveDeferredShapedMetricsImpl(
+		[](auto task) { return std::thread(std::move(task)); },
+		[] { return false; },
+		100);
+}
+
+namespace testing {
+
+bool ResolveDeferredShapedMetricsWithTestHooks(
+		int workerStartFailures,
+		bool cancel,
+		int retryDelay,
+		int *workerStartAttempts) {
+	return ResolveDeferredShapedMetricsImpl(
+		[remainingFailures = workerStartFailures,
+		 workerStartAttempts](auto task) mutable {
+			if (workerStartAttempts) {
+				++*workerStartAttempts;
+			}
+			if (remainingFailures > 0) {
+				--remainingFailures;
+				throw std::system_error(std::make_error_code(
+					std::errc::resource_unavailable_try_again));
+			}
+			return std::thread(std::move(task));
+		},
+		[cancel] { return cancel; },
+		retryDelay);
+}
+
+} // namespace testing
 
 bool PreloadCustomFonts() {
 	return LoadCustomFonts();
