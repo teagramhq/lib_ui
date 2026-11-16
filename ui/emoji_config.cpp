@@ -5,6 +5,7 @@
 // https://github.com/desktop-app/legal/blob/master/LEGAL
 //
 #include "emoji_config.h"
+#include "emoji_background_tasks.h"
 
 #include "ui/widgets/fields/input_field.h"
 #include "emoji_suggestions_helper.h"
@@ -25,9 +26,21 @@
 
 #include <crl/crl_async.h>
 
+#include <type_traits>
+#include <utility>
+
 namespace Ui {
 namespace Emoji {
 namespace {
+
+internal::BackgroundTasks BackgroundWork;
+
+template <typename Callable> void RunBackground(Callable &&callable) {
+	if (auto token = BackgroundWork.start()) {
+		crl::async(internal::TrackedTask<std::decay_t<Callable>>{
+			std::move(*token), std::forward<Callable>(callable)});
+	}
+}
 
 constexpr auto kUniversalSize = 72;
 constexpr auto kImagesPerRow = 32;
@@ -299,7 +312,7 @@ QImage LoadFromFile(int id, int size, int index) {
 	// This should remove a non necessary detach on Retina screens later.
 	result.setDevicePixelRatio(style::DevicePixelRatio());
 
-	crl::async([=, signature = std::move(signature)] {
+	RunBackground([=, signature = std::move(signature)] {
 		// This should not happen (invalid signature),
 		// so we delay this check and fix only the next launch.
 		const auto data = bytes::make_span(
@@ -485,10 +498,11 @@ QImage UniversalImages::generate(int size, int index) const {
 }
 
 void Init() {
+	BackgroundWork.restart();
 	internal::Init();
 
 	// Pre-warm InstantReplaces trie on background thread.
-	crl::async([] { InstantReplaces::Default(); });
+	RunBackground([] { InstantReplaces::Default(); });
 
 	const auto count = internal::FullCount();
 	const auto persprite = kImagesPerRow * kImageRowsPerSprite;
@@ -524,13 +538,14 @@ void Clear() {
 	TouchbarInstance = nullptr;
 	TouchbarEmoji = nullptr;
 #endif
+	BackgroundWork.stopAndWait();
 }
 
 void ClearIrrelevantCache() {
 	Expects(SizeNormal > 0);
 	Expects(SizeLarge > 0);
 
-	crl::async([] {
+	RunBackground([] {
 		const auto folder = internal::CacheFileFolder();
 		const auto list = QDir(folder).entryList(QDir::Files);
 		const auto good1 = CacheFileNameMask(SizeNormal);
@@ -572,7 +587,7 @@ void SwitchToSet(int id, Fn<void(bool)> callback) {
 		callback(true);
 		return;
 	}
-	crl::async([=] {
+	RunBackground([=] {
 		auto universal = std::make_shared<UniversalImages>(id);
 		if (!universal->ensureLoaded()) {
 			crl::on_main([=] {
@@ -870,11 +885,8 @@ void Instance::generateCache() {
 	}
 	const auto size = _size;
 	const auto index = _sprites.size();
-	crl::async([
-		=,
-		universal = Universal,
-		guard = _generating.make_guard()
-	]() mutable {
+	RunBackground([=, universal = Universal,
+				   guard = _generating.make_guard()]() mutable {
 		auto image = universal->generate(size, index);
 		crl::on_main(std::move(guard), [
 			=,
