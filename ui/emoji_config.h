@@ -26,6 +26,8 @@ namespace internal {
 } // namespace internal
 
 void Init();
+// Completion runs on the last worker, or immediately when already drained.
+void StopAndDrain(Fn<void()> done);
 void Clear();
 
 void ClearIrrelevantCache();

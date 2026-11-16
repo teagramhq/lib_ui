@@ -6,10 +6,11 @@
 //
 #pragma once
 
-#include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace Ui::Emoji::internal {
 
@@ -46,10 +47,21 @@ class BackgroundTasks final {
 		return Token(this);
 	}
 
-	void stopAndWait() {
-		auto lock = std::unique_lock(_mutex);
-		_stopped = true;
-		_finished.wait(lock, [&] { return _pending == 0; });
+	void stop(std::function<void()> done) {
+		{
+			const auto lock = std::lock_guard(_mutex);
+			_stopped = true;
+			if (_pending) {
+				_onDrained.push_back(std::move(done));
+				return;
+			}
+		}
+		done();
+	}
+
+	[[nodiscard]] bool stoppedAndDrained() {
+		const auto lock = std::lock_guard(_mutex);
+		return _stopped && (_pending == 0);
 	}
 
 	void restart() {
@@ -59,14 +71,20 @@ class BackgroundTasks final {
 
   private:
 	void finish() {
-		const auto lock = std::lock_guard(_mutex);
-		if (--_pending == 0) {
-			_finished.notify_all();
+		auto callbacks = std::vector<std::function<void()>>();
+		{
+			const auto lock = std::lock_guard(_mutex);
+			if (--_pending == 0) {
+				callbacks.swap(_onDrained);
+			}
+		}
+		for (auto &callback : callbacks) {
+			callback();
 		}
 	}
 
 	std::mutex _mutex;
-	std::condition_variable _finished;
+	std::vector<std::function<void()>> _onDrained;
 	int _pending = 0;
 	bool _stopped = true;
 };

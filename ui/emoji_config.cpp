@@ -26,6 +26,7 @@
 
 #include <crl/crl_async.h>
 
+#include <atomic>
 #include <type_traits>
 #include <utility>
 
@@ -34,6 +35,7 @@ namespace Emoji {
 namespace {
 
 internal::BackgroundTasks BackgroundWork;
+std::atomic_uint64_t CallbackGeneration = 0;
 
 template <typename Callable> void RunBackground(Callable &&callable) {
 	if (auto token = BackgroundWork.start()) {
@@ -498,6 +500,7 @@ QImage UniversalImages::generate(int size, int index) const {
 }
 
 void Init() {
+	++CallbackGeneration;
 	BackgroundWork.restart();
 	internal::Init();
 
@@ -528,7 +531,13 @@ void Init() {
 #endif
 }
 
+void StopAndDrain(Fn<void()> done) {
+	++CallbackGeneration;
+	BackgroundWork.stop(std::move(done));
+}
+
 void Clear() {
+	Expects(BackgroundWork.stoppedAndDrained());
 	MainEmojiMap.clear();
 	OtherEmojiMap.clear();
 
@@ -538,7 +547,6 @@ void Clear() {
 	TouchbarInstance = nullptr;
 	TouchbarEmoji = nullptr;
 #endif
-	BackgroundWork.stopAndWait();
 }
 
 void ClearIrrelevantCache() {
@@ -587,14 +595,21 @@ void SwitchToSet(int id, Fn<void(bool)> callback) {
 		callback(true);
 		return;
 	}
+	const auto generation = CallbackGeneration.load();
 	RunBackground([=] {
 		auto universal = std::make_shared<UniversalImages>(id);
 		if (!universal->ensureLoaded()) {
 			crl::on_main([=] {
+				if (generation != CallbackGeneration.load()) {
+					return;
+				}
 				callback(false);
 			});
 		} else {
 			crl::on_main([=, universal = std::move(universal)]() mutable {
+				if (generation != CallbackGeneration.load()) {
+					return;
+				}
 				SwitchToSetPrepared(id, std::move(universal));
 				callback(true);
 			});
