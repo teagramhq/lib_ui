@@ -54,6 +54,9 @@ namespace style::internal {
 [[nodiscard]] bool PreloadCustomFonts();
 void SetPreloadedCustomFonts(bool openSansLoaded);
 
+// Installs the platform fallback chain before font metrics are prewarmed.
+void PrepareFontSubstitutions();
+
 void StartFonts();
 
 void DestroyFonts();

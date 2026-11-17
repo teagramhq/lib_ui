@@ -73,6 +73,7 @@ ResolvedFont::ResolvedFont(FontResolveResult result, FontVariants *modified)
 namespace {
 
 bool Started = false;
+bool FontSubstitutionsPrepared = false;
 bool CustomFontsPreloaded = false;
 bool OpenSansLoaded = false;
 
@@ -383,6 +384,34 @@ void SetPreloadedCustomFonts(bool openSansLoaded) {
 	OpenSansLoaded = openSansLoaded;
 }
 
+void PrepareFontSubstitutions() {
+	if (FontSubstitutionsPrepared) {
+		return;
+	}
+	FontSubstitutionsPrepared = true;
+
+	const auto name = u"Open Sans"_q;
+	QFont::insertSubstitution(name, u"Vazirmatn UI NL"_q);
+
+#ifdef Q_OS_WIN
+	QFont::insertSubstitutions(
+		name, {
+				  // https://qt-project.atlassian.net/browse/QTBUG-134052
+				  u"Ebrima"_q,
+				  // https://qt-project.atlassian.net/browse/QTBUG-94756
+				  u"Nirmala UI"_q,
+			  });
+#elif defined Q_OS_MAC // Q_OS_WIN
+	const auto list = QStringList{
+		u"STIXGeneral"_q,
+		u".SF NS Text"_q,
+		u"Helvetica Neue"_q,
+		u"Lucida Grande"_q,
+	};
+	QFont::insertSubstitutions(name, list);
+#endif				   // Q_OS_MAC
+}
+
 void StartFonts() {
 	if (Started) {
 		return;
@@ -407,24 +436,7 @@ void StartFonts() {
 #endif //  __has_include(<glib.h>)
 	}
 
-	QFont::insertSubstitution(name, u"Vazirmatn UI NL"_q);
-
-#ifdef Q_OS_WIN
-	QFont::insertSubstitutions(name, {
-		// https://qt-project.atlassian.net/browse/QTBUG-134052
-		u"Ebrima"_q,
-		// https://qt-project.atlassian.net/browse/QTBUG-94756
-		u"Nirmala UI"_q,
-	});
-#elif defined Q_OS_MAC // Q_OS_WIN
-	const auto list = QStringList{
-		u"STIXGeneral"_q,
-		u".SF NS Text"_q,
-		u"Helvetica Neue"_q,
-		u"Lucida Grande"_q,
-	};
-	QFont::insertSubstitutions(name, list);
-#endif // Q_OS_MAC
+	PrepareFontSubstitutions();
 }
 
 void DestroyFonts() {
